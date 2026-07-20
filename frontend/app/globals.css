@@ -1,0 +1,52 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --bg: #f6f7fb;
+  --card: #ffffff;
+  --text: #0f172a;
+  --muted: #64748b;
+  --border: #e2e8f0;
+}
+.dark {
+  --bg: #0b1020;
+  --card: #131a2e;
+  --text: #e6ebf5;
+  --muted: #94a3b8;
+  --border: #24304d;
+}
+
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@layer components {
+  .card {
+    @apply rounded-2xl border p-5 shadow-sm;
+    background: var(--card);
+    border-color: var(--border);
+  }
+  .btn {
+    @apply inline-flex items-center gap-2 rounded-xl px-4 py-2 text-sm font-medium transition;
+  }
+  .btn-primary {
+    @apply btn bg-brand-600 text-white hover:bg-brand-700;
+  }
+  .btn-ghost {
+    @apply btn border;
+    border-color: var(--border);
+  }
+  .input {
+    @apply w-full rounded-xl border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-brand-500;
+    background: var(--card);
+    border-color: var(--border);
+    color: var(--text);
+  }
+  .muted { color: var(--muted); }
+  .badge {
+    @apply inline-flex rounded-full px-2 py-0.5 text-xs font-medium;
+  }
+}
