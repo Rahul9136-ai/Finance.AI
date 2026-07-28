@@ -65,8 +65,8 @@ export default function Assistant({ compact = false }: { compact?: boolean }) {
               {m.text}
               {m.grounded && m.grounded.length > 0 && (
                 <div className="mt-1 flex flex-wrap gap-1">
-                  {m.grounded.map((g) => (
-                    <span key={g} className="badge bg-emerald-100 text-emerald-700">{g}</span>
+                  {m.grounded.map((g, gi) => (
+                    <span key={`${g}-${gi}`} className="badge bg-emerald-100 text-emerald-700">🔧 {g}</span>
                   ))}
                 </div>
               )}

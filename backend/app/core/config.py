@@ -15,11 +15,13 @@ class Settings(BaseSettings):
     database_url: str = ""
 
     # AI
-    ai_provider: str = "auto"  # auto | openai | anthropic | rules
+    ai_provider: str = "auto"  # auto | openai | anthropic | ollama | rules
     openai_api_key: str = ""
     anthropic_api_key: str = ""
     ai_model_openai: str = "gpt-4o-mini"
     ai_model_anthropic: str = "claude-sonnet-5"
+    ollama_base_url: str = "http://localhost:11434"
+    ai_model_ollama: str = "llama3.2"
 
     cors_origins: str = "http://localhost:3000"
 

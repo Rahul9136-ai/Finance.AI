@@ -5,6 +5,7 @@ from app.ai import skills
 from app.ai.provider import active_provider
 from app.core.rbac import require
 from app.db.session import get_db
+from app.models.org import Organization
 from app.models.user import User
 from app.schemas import ChatIn, ExpenseCategorizeIn, FraudCheckIn, InvoiceReadIn
 
@@ -23,8 +24,10 @@ def chat(body: ChatIn, user: User = Depends(require("ai:read")),
 
 
 @router.post("/read-invoice")
-def read_invoice(body: InvoiceReadIn, user: User = Depends(require("ai:read"))):
-    return skills.read_invoice(body.text)
+def read_invoice(body: InvoiceReadIn, user: User = Depends(require("ai:read")),
+                 db: Session = Depends(get_db)):
+    org = db.get(Organization, user.org_id)
+    return skills.read_invoice(body.text, own_gstin=org.gstin if org else None)
 
 
 @router.post("/categorize")

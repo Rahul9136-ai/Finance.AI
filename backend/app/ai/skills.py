@@ -9,9 +9,11 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.ai.provider import active_provider, complete
+from app.ai.provider import active_provider, complete, run_tool_loop
 from app.models.invoice import Invoice
+from app.models.org import Organization
 from app.services import dashboard
+from app.services import gst as gst_mod
 from app.services.ledger import money
 
 # ---------------------------------------------------------------------------
@@ -19,7 +21,6 @@ from app.services.ledger import money
 # ---------------------------------------------------------------------------
 _AMOUNT_RE = re.compile(r"(?:total|amount due|grand total)[^\d]{0,12}([\d,]+\.?\d*)", re.I)
 _DATE_RE = re.compile(r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})")
-_GSTIN_RE = re.compile(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z\d])\b")
 # A document number must contain a digit (so the literal word "Invoice" can't
 # match). Prefer a labelled number, else any alnum token with letters + digits.
 _NUM_LABELLED = re.compile(
@@ -37,22 +38,23 @@ def _extract_number(text: str) -> str | None:
     return m.group(1) if m else None
 
 
-def read_invoice(raw_text: str) -> dict:
+def read_invoice(raw_text: str, *, own_gstin: str | None = None) -> dict:
     """Extract structured fields from raw invoice text (regex heuristics;
     an LLM refines them when available)."""
     text = raw_text or ""
     amounts = [float(a.replace(",", "")) for a in _AMOUNT_RE.findall(text)]
     total = max(amounts) if amounts else None
+    vendor_gstin, gstin_warnings = gst_mod.pick_vendor_gstin(text, own_gstin=own_gstin)
     result = {
-        "vendor_gstin": (_GSTIN_RE.search(text) or [None]) and (
-            _GSTIN_RE.search(text).group(1) if _GSTIN_RE.search(text) else None
-        ),
+        "vendor_gstin": vendor_gstin,
         "invoice_number": _extract_number(text),
         "invoice_date": (_DATE_RE.search(text).group(1) if _DATE_RE.search(text) else None),
         "total": total,
         "confidence": 0.6 if total else 0.3,
         "engine": "rules",
     }
+    if gstin_warnings:
+        result["warnings"] = gstin_warnings
     return result
 
 
@@ -65,18 +67,25 @@ _BILL_SCHEMA = (
 )
 
 
-def llm_extract_bill(text: str) -> dict | None:
+def llm_extract_bill(text: str, *, own_gstin: str | None = None) -> dict | None:
     """Extract structured bill fields with an LLM (much more accurate on arbitrary
     layouts). Returns a parsed dict, or None if no provider/failed. Numbers only —
     no currency symbols or commas."""
     if active_provider() == "rules" or not (text or "").strip():
         return None
+    own_note = (
+        f"\n\nOur own company's GSTIN is {own_gstin} — if it appears on this "
+        "document it belongs to the RECIPIENT (buyer), never return it as "
+        "vendor_gstin." if own_gstin else ""
+    )
     out = complete(
         "Extract the fields from this vendor bill / tax invoice as STRICT JSON "
         f"matching exactly this shape (numbers with no commas or currency symbols, "
         f"use null when a field is absent):\n{_BILL_SCHEMA}\n\n"
         "Rules: taxable_base is the amount BEFORE tax. total_gst = cgst+sgst+igst "
-        "if those are given. Do not confuse quantities/HSN codes with money.\n\n"
+        "if those are given. Do not confuse quantities/HSN codes with money. "
+        "vendor_name/vendor_gstin are the SELLER's — a tax invoice also shows the "
+        f"buyer/recipient's GSTIN; do not return that one instead.{own_note}\n\n"
         f"BILL TEXT:\n{text[:5000]}",
         system="You are a precise invoice data-extraction engine. Output only JSON, no prose, no markdown fences.",
         max_tokens=900,
@@ -202,9 +211,115 @@ def forecast_cashflow(db: Session, org_id: int, horizon_days: int = 90) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# 5. Finance chatbot (grounded)
+# 5. Finance chatbot — real LLM tool-calling over the skills above, with a
+#    deterministic keyword fallback when no LLM key is configured.
 # ---------------------------------------------------------------------------
+_CHAT_TOOLS = [
+    {
+        "name": "get_kpis",
+        "description": ("Get current live financial KPIs: cash balance, total "
+                         "receivables, total payables, revenue, expenses, profit, "
+                         "and net GST due."),
+        "parameters": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "read_invoice",
+        "description": ("Extract structured fields (vendor GSTIN, invoice number, "
+                         "date, total) from raw invoice/bill text."),
+        "parameters": {
+            "type": "object",
+            "properties": {"text": {"type": "string", "description": "Raw invoice or bill text"}},
+            "required": ["text"],
+        },
+    },
+    {
+        "name": "categorize_expense",
+        "description": "Suggest the accounting category/account code for an expense description.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string"},
+                "amount": {"type": "number"},
+            },
+            "required": ["description"],
+        },
+    },
+    {
+        "name": "score_fraud",
+        "description": ("Score a transaction for fraud/anomaly risk (duplicate bills, "
+                         "round amounts, weekend dates, high value)."),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "amount": {"type": "number"},
+                "description": {"type": "string"},
+                "vendor_id": {"type": "integer"},
+            },
+            "required": ["amount"],
+        },
+    },
+    {
+        "name": "forecast_cashflow",
+        "description": "Project cash balance forward using open receivables and payables due dates.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "horizon_days": {"type": "integer", "description": "Days to project, default 90"},
+            },
+        },
+    },
+]
+
+
+def _chat_executor(db: Session, org_id: int):
+    org_row = db.get(Organization, org_id)
+    own_gstin = org_row.gstin if org_row else None
+
+    def executor(name: str, args: dict) -> dict:
+        try:
+            if name == "get_kpis":
+                return dashboard.kpis(db, org_id)
+            if name == "read_invoice":
+                return read_invoice(args.get("text", ""), own_gstin=own_gstin)
+            if name == "categorize_expense":
+                return categorize_expense(args.get("description", ""), args.get("amount"))
+            if name == "score_fraud":
+                return score_fraud(
+                    db, org_id, amount=args.get("amount", 0),
+                    vendor_id=args.get("vendor_id"), description=args.get("description", ""),
+                )
+            if name == "forecast_cashflow":
+                return forecast_cashflow(db, org_id, args.get("horizon_days") or 90)
+            return {"error": f"unknown tool {name}"}
+        except Exception as e:
+            return {"error": str(e)}
+    return executor
+
+
 def chat(db: Session, org_id: int, question: str) -> dict:
+    if active_provider() != "rules":
+        result = run_tool_loop(
+            question,
+            system=("You are an ERP finance assistant. You have tools to read live "
+                     "financial data and run finance skills (invoice extraction, expense "
+                     "categorization, fraud scoring, cashflow forecasting). Always call a "
+                     "tool to get real figures before answering — never invent numbers. "
+                     "Be concise."),
+            tools=_CHAT_TOOLS,
+            executor=_chat_executor(db, org_id),
+        )
+        if result and result["answer"]:
+            return {
+                "answer": result["answer"],
+                "engine": active_provider(),
+                "grounded_on": [c["name"] for c in result["tool_calls"]],
+            }
+
+    return _chat_rules(db, org_id, question)
+
+
+def _chat_rules(db: Session, org_id: int, question: str) -> dict:
+    """Deterministic keyword-matched fallback for when no LLM key is configured."""
     q = (question or "").lower()
     k = dashboard.kpis(db, org_id)
 
