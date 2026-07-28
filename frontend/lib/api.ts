@@ -80,6 +80,7 @@ async function req(path: string, opts: RequestInit = {}, _retried = false): Prom
     const body = await res.json().catch(() => ({}));
     throw new Error(body.detail || `Request failed (${res.status})`);
   }
+  if (res.status === 204) return null;
   return res.json();
 }
 
@@ -87,6 +88,9 @@ export const api = {
   get: (p: string) => req(p),
   post: (p: string, body?: unknown) =>
     req(p, { method: "POST", body: body ? JSON.stringify(body) : undefined }),
+  patch: (p: string, body?: unknown) =>
+    req(p, { method: "PATCH", body: body ? JSON.stringify(body) : undefined }),
+  del: (p: string) => req(p, { method: "DELETE" }),
 };
 
 export async function login(email: string, password: string) {
@@ -96,7 +100,10 @@ export async function login(email: string, password: string) {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: form.toString(),
   });
-  if (!res.ok) throw new Error("Incorrect email or password");
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.detail || `Login failed (${res.status})`);
+  }
   const data = await res.json();
   setTokens(data.access_token, data.refresh_token);
   return data;
