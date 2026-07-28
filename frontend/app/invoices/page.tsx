@@ -2,7 +2,8 @@
 import { useEffect, useState } from "react";
 import Shell from "@/components/Shell";
 import { api, getToken, inr } from "@/lib/api";
-import { Plus, Upload, Pencil, FileSpreadsheet, FileText, ScanLine, FileType, X } from "lucide-react";
+import { downloadCsv, toCsv } from "@/lib/csv";
+import { Plus, Upload, Pencil, FileSpreadsheet, FileText, ScanLine, FileType, X, Download } from "lucide-react";
 
 type Invoice = {
   id: number; kind: string; number: string; issue_date: string; due_date: string;
@@ -44,6 +45,15 @@ export default function InvoicesPage() {
   // cleanup fn (that throws "destroy is not a function" on unmount).
   useEffect(() => { load(); }, [kind]);
 
+  function exportCsv() {
+    const cols = kind === "AP"
+      ? ["number", "entry_mode", "issue_date", "due_date", "subtotal", "tax_total",
+         "tds_total", "total", "amount_paid", "status"]
+      : ["number", "issue_date", "due_date", "subtotal", "tax_total", "total",
+         "amount_paid", "status"];
+    downloadCsv(`invoices-${kind}-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows, cols));
+  }
+
   async function pay(inv: Invoice) {
     const outstanding = inv.total - inv.amount_paid;
     try {
@@ -75,6 +85,9 @@ export default function InvoicesPage() {
                 className={`btn ${kind === k ? "bg-brand-600 text-white" : ""}`}>{k}</button>
             ))}
           </div>
+          <button className="btn-ghost" onClick={exportCsv} disabled={rows.length === 0}>
+            <Download size={16} /> Export CSV
+          </button>
           {kind === "AP" && (
             <button className="btn-primary" onClick={() => setShowBill(true)}>
               <Plus size={16} /> New Bill

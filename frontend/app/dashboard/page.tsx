@@ -3,12 +3,13 @@ import { useEffect, useState } from "react";
 import Shell from "@/components/Shell";
 import Assistant from "@/components/Assistant";
 import { api, inr } from "@/lib/api";
+import { downloadCsv, toCsv } from "@/lib/csv";
 import {
   ResponsiveContainer, BarChart, Bar, XAxis, YAxis, Tooltip, CartesianGrid,
   AreaChart, Area, Legend,
 } from "recharts";
 import {
-  Wallet, TrendingUp, TrendingDown, Receipt, ArrowDownRight, ArrowUpRight,
+  Wallet, TrendingUp, TrendingDown, Receipt, ArrowDownRight, ArrowUpRight, Download,
 } from "lucide-react";
 
 type KPI = {
@@ -45,9 +46,26 @@ export default function Dashboard() {
     api.get("/api/ai/forecast?horizon_days=90").then((f) => setForecast(f.series)).catch(() => {});
   }, []);
 
+  function exportCsv() {
+    if (!kpi) return;
+    const summary = toCsv(
+      Object.entries(kpi).map(([metric, value]) => ({ metric, value })),
+      ["metric", "value"],
+    );
+    const revenueTable = rev.length ? "\n\nRevenue vs Expense\n" + toCsv(rev) : "";
+    const agingTable = aging.length ? "\n\nAR Aging\n" + toCsv(aging) : "";
+    downloadCsv(`dashboard-${new Date().toISOString().slice(0, 10)}.csv`,
+      summary + revenueTable + agingTable);
+  }
+
   return (
     <Shell>
-      <h1 className="mb-1 text-2xl font-bold">Dashboard</h1>
+      <div className="mb-1 flex items-center justify-between">
+        <h1 className="text-2xl font-bold">Dashboard</h1>
+        <button className="btn-ghost" onClick={exportCsv} disabled={!kpi}>
+          <Download size={16} /> Export CSV
+        </button>
+      </div>
       <p className="muted mb-5 text-sm">Real-time financial health, powered by your live ledger.</p>
 
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">

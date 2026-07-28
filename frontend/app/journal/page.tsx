@@ -2,7 +2,8 @@
 import { useEffect, useState } from "react";
 import Shell from "@/components/Shell";
 import { api, inr } from "@/lib/api";
-import { BookOpen, Scale, ListTree, Plus, Trash2, X } from "lucide-react";
+import { downloadCsv, toCsv } from "@/lib/csv";
+import { BookOpen, Scale, ListTree, Plus, Trash2, X, Download } from "lucide-react";
 
 type Line = { account_id: number; debit: number; credit: number; description: string };
 type Entry = {
@@ -75,9 +76,23 @@ function JournalTab({ acctMap, accounts }: { acctMap: Record<number, string>; ac
     catch (e: any) { alert(e.message); }
   }
 
+  function exportCsv() {
+    const rows = entries.flatMap((e) =>
+      e.lines.map((l) => ({
+        entry_id: e.id, date: e.entry_date, memo: e.memo, status: e.status,
+        source: e.source, account: acctMap[l.account_id] || l.account_id,
+        debit: l.debit, credit: l.credit, line_description: l.description,
+      }))
+    );
+    downloadCsv(`journal-entries-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows));
+  }
+
   return (
     <div className="space-y-3">
-      <div className="flex justify-end">
+      <div className="flex justify-end gap-2">
+        <button className="btn-ghost" onClick={exportCsv} disabled={entries.length === 0}>
+          <Download size={16} /> Export CSV
+        </button>
         <button className="btn-primary" onClick={() => setShowNew(true)}>
           <Plus size={16} /> New Journal Entry
         </button>
@@ -139,13 +154,26 @@ function TrialBalanceTab() {
   useEffect(() => { api.get("/api/ledger/trial-balance").then(setTb).catch(() => {}); }, []);
   if (!tb) return <p className="muted">Loading…</p>;
 
+  function exportCsv() {
+    const rows = tb.accounts.map((a: any) => ({
+      code: a.code, name: a.name, type: a.type, debit: a.debit, credit: a.credit,
+    }));
+    rows.push({ code: "", name: "TOTAL", type: "", debit: tb.total_debit, credit: tb.total_credit });
+    downloadCsv(`trial-balance-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows));
+  }
+
   return (
     <div className="card overflow-x-auto">
       <div className="mb-3 flex items-center justify-between">
         <h3 className="font-semibold">Trial Balance</h3>
-        <span className={`badge ${tb.balanced ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
-          {tb.balanced ? "✓ Balanced" : "✗ Out of balance"}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className={`badge ${tb.balanced ? "bg-emerald-100 text-emerald-700" : "bg-rose-100 text-rose-700"}`}>
+            {tb.balanced ? "✓ Balanced" : "✗ Out of balance"}
+          </span>
+          <button className="btn-ghost" onClick={exportCsv}>
+            <Download size={16} /> Export CSV
+          </button>
+        </div>
       </div>
       <table className="w-full text-sm">
         <thead>
@@ -193,6 +221,14 @@ function AccountLedgerTab({ accounts }: { accounts: any[] }) {
     if (accountId != null) api.get(`/api/ledger/account/${accountId}`).then(setData).catch(() => {});
   }, [accountId]);
 
+  function exportCsv() {
+    if (!data) return;
+    const rows = data.lines.map((l: any) => ({
+      date: l.date, ref: l.ref, memo: l.memo, debit: l.debit, credit: l.credit, balance: l.balance,
+    }));
+    downloadCsv(`account-ledger-${data.account.code}-${new Date().toISOString().slice(0, 10)}.csv`, toCsv(rows));
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -209,11 +245,16 @@ function AccountLedgerTab({ accounts }: { accounts: any[] }) {
         <div className="card overflow-x-auto">
           <div className="mb-3 flex items-center justify-between">
             <h3 className="font-semibold">{data.account.code} {data.account.name}</h3>
-            <span className="text-sm">
-              <span className="muted">Closing balance: </span>
-              <span className="font-bold">{inr(data.closing_balance)}</span>
-              <span className="muted"> ({data.account.normal})</span>
-            </span>
+            <div className="flex items-center gap-3">
+              <span className="text-sm">
+                <span className="muted">Closing balance: </span>
+                <span className="font-bold">{inr(data.closing_balance)}</span>
+                <span className="muted"> ({data.account.normal})</span>
+              </span>
+              <button className="btn-ghost" onClick={exportCsv} disabled={data.lines.length === 0}>
+                <Download size={16} /> Export CSV
+              </button>
+            </div>
           </div>
           <table className="w-full text-sm">
             <thead>
