@@ -11,7 +11,17 @@ The `require(*perms)` dependency guards every mutating route.
 ## Resources
 
 `dashboard, account, journal, invoice, payment, vendor, customer, tax, report,
-user, ai`
+user, role, ai`
+
+## Custom roles
+
+Beyond the 5 seeded roles below, a `super_admin` can define additional roles
+with their own permission set (Users → Roles in the UI, or `POST /api/roles`)
+— picked from the real, enforced catalog at `GET /api/permissions` (every
+entry there is checked by some route; there's no permission a role could be
+given that doesn't actually do anything). `super_admin` itself (`*:*`) can't
+be edited or deleted via the API, so there's always at least one role with
+full access.
 
 ## Role → permission matrix (Phase 1 subset)
 

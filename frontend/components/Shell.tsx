@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { api, clearToken, getToken } from "@/lib/api";
 import { BrandLogo } from "@/components/Logo";
 import {
-  LayoutDashboard, BookOpen, FileText, Bot, Moon, Sun, LogOut,
+  LayoutDashboard, BookOpen, FileText, Bot, Moon, Sun, LogOut, Users,
 } from "lucide-react";
 
 const NAV = [
@@ -14,6 +14,13 @@ const NAV = [
   { href: "/invoices", label: "Invoices (AR/AP)", icon: FileText },
   { href: "/assistant", label: "AI Assistant", icon: Bot },
 ];
+
+function hasPerm(perms: string[] | undefined, needed: string): boolean {
+  if (!perms) return false;
+  if (perms.includes("*:*") || perms.includes(needed)) return true;
+  const [resource, action] = needed.split(":");
+  return perms.includes(`${resource}:*`) || perms.includes(`*:${action}`);
+}
 
 export default function Shell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -27,8 +34,13 @@ export default function Shell({ children }: { children: React.ReactNode }) {
       return;
     }
     setDark(document.documentElement.classList.contains("dark"));
-    api.get("/api/auth/me").then(setMe).catch(() => {});
-  }, [router]);
+    api.get("/api/auth/me").then((m) => {
+      setMe(m);
+      if (m.must_change_password && pathname !== "/change-password") {
+        router.replace("/change-password");
+      }
+    }).catch(() => {});
+  }, [router, pathname]);
 
   function toggleTheme() {
     const el = document.documentElement;
@@ -64,6 +76,15 @@ export default function Shell({ children }: { children: React.ReactNode }) {
               </Link>
             );
           })}
+          {hasPerm(me?.permissions, "user:create") && (
+            <Link href="/users"
+              className={`flex items-center gap-3 rounded-xl px-3 py-2 text-sm font-medium ${
+                pathname === "/users" ? "bg-brand-600 text-white" : "hover:bg-black/5 dark:hover:bg-white/5"
+              }`}>
+              <Users size={18} />
+              Users
+            </Link>
+          )}
         </nav>
       </aside>
 

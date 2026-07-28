@@ -13,18 +13,6 @@ class RefreshIn(BaseModel):
     refresh_token: str
 
 
-class UserOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-    id: int
-    email: EmailStr
-    full_name: str
-    org_id: int
-
-    @property
-    def role_name(self) -> str:  # populated in router
-        return ""
-
-
 class MeOut(BaseModel):
     id: int
     email: EmailStr
@@ -32,6 +20,59 @@ class MeOut(BaseModel):
     org_id: int
     role: str
     permissions: list[str]
+    must_change_password: bool
+
+
+class UserOut(BaseModel):
+    id: int
+    email: EmailStr
+    full_name: str
+    role: str
+    is_active: bool
+    must_change_password: bool
+
+
+class UserCreateIn(BaseModel):
+    email: EmailStr
+    full_name: str
+    role: str
+
+
+class UserCreateOut(UserOut):
+    temp_password: str
+
+
+class UserUpdateIn(BaseModel):
+    is_active: bool
+
+
+class ChangePasswordIn(BaseModel):
+    current_password: str
+    new_password: str = Field(min_length=8)
+
+
+class RoleOut(BaseModel):
+    id: int
+    name: str
+    description: str
+    permissions: list[str]
+
+
+class RoleCreateIn(BaseModel):
+    name: str = Field(min_length=2, max_length=50, pattern=r"^[a-z][a-z0-9_]*$")
+    description: str = ""
+    permissions: list[str] = Field(default_factory=list)
+
+
+class RoleUpdateIn(BaseModel):
+    description: str | None = None
+    permissions: list[str]
+
+
+class PermissionCatalogOut(BaseModel):
+    resource: str
+    label: str
+    actions: list[str]
 
 
 # ---- Accounts ----
@@ -115,6 +156,7 @@ class InvoiceLineIn(BaseModel):
     quantity: float = 1
     unit_price: float = 0
     tax_rate: float = 0
+    hsn_sac: str | None = None
     account_id: int | None = None
 
 
@@ -169,6 +211,8 @@ class BillDistributeIn(BaseModel):
     tds_rate: float | None = None
     tds_amount: float | None = None
     description: str = ""
+    vendor_id: int | None = None  # if an existing vendor is already selected,
+    # lets the preview show the real CGST/SGST-vs-IGST split (see gst.py)
 
 
 class BillItemIn(BaseModel):
@@ -180,6 +224,7 @@ class ClassifyItemsIn(BaseModel):
     items: list[BillItemIn] = Field(min_length=1)
     tds_rate: float = 0
     tds_amount: float | None = None
+    vendor_id: int | None = None
 
 
 class BillItemsPostIn(BaseModel):

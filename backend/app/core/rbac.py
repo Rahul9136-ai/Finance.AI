@@ -3,6 +3,29 @@ from fastapi import Depends, HTTPException, status
 from app.core.deps import get_current_user
 from app.models.user import User
 
+# The full catalog of resource:action permissions actually enforced by a
+# `require(...)` call somewhere in the API, plus role-management itself.
+# This drives the custom-role permission picker — every entry here does
+# something real; there's no "resource:action" a role could be given that
+# isn't already checked by some route.
+PERMISSION_CATALOG: list[dict] = [
+    {"resource": "dashboard", "label": "Dashboard", "actions": ["read"]},
+    {"resource": "account", "label": "Chart of Accounts", "actions": ["read"]},
+    {"resource": "journal", "label": "General Ledger", "actions": ["read", "post"]},
+    {"resource": "invoice", "label": "Invoices (AR/AP)", "actions": ["read", "create", "post"]},
+    {"resource": "payment", "label": "Payments", "actions": ["create"]},
+    {"resource": "vendor", "label": "Vendors", "actions": ["read", "create"]},
+    {"resource": "customer", "label": "Customers", "actions": ["read", "create"]},
+    {"resource": "report", "label": "Reports & Statements", "actions": ["read"]},
+    {"resource": "user", "label": "User Management", "actions": ["read", "create", "update"]},
+    {"resource": "role", "label": "Role Management", "actions": ["read", "create", "update"]},
+    {"resource": "ai", "label": "AI Assistant", "actions": ["read"]},
+]
+
+
+def valid_permission_set() -> set[str]:
+    return {f"{r['resource']}:{a}" for r in PERMISSION_CATALOG for a in r["actions"]}
+
 
 def _has_permission(perms: set[str], needed: str) -> bool:
     if "*:*" in perms or needed in perms:

@@ -37,10 +37,16 @@ COA = [
     ("1010", "Bank", "asset"),
     ("1100", "Accounts Receivable", "asset"),
     ("1200", "Inventory", "asset"),
-    ("1300", "GST Input Credit", "asset"),
+    ("1300", "GST Input Credit (Unclassified)", "asset"),
+    ("1301", "CGST Input Credit", "asset"),
+    ("1302", "SGST Input Credit", "asset"),
+    ("1303", "IGST Input Credit", "asset"),
     ("1500", "Fixed Assets", "asset"),
     ("2000", "Accounts Payable", "liability"),
-    ("2100", "GST Output Payable", "liability"),
+    ("2100", "GST Output Payable (Unclassified)", "liability"),
+    ("2101", "CGST Output Payable", "liability"),
+    ("2102", "SGST Output Payable", "liability"),
+    ("2103", "IGST Output Payable", "liability"),
     ("2110", "TDS Payable", "liability"),
     ("3000", "Share Capital", "equity"),
     ("4000", "Sales Revenue", "income"),
@@ -88,7 +94,8 @@ def run():
 
     org, _ = get_or_create(
         db, Organization, name="Demo Manufacturing Pvt Ltd",
-        defaults={"country": "IN", "base_currency": "INR", "gstin": "27AAAAA0000A1Z5"},
+        defaults={"country": "IN", "base_currency": "INR", "gstin": "27AAAAA0000A1Z5",
+                  "state_code": "27"},  # Maharashtra
     )
 
     for email, full_name, role_name in USERS:
@@ -96,9 +103,11 @@ def run():
             db, User, email=email,
             defaults={"org_id": org.id, "role_id": roles[role_name].id,
                       "full_name": full_name,
-                      "hashed_password": hash_password("demo1234")},
+                      "hashed_password": hash_password("demo1234"),
+                      "must_change_password": False},
         )
         u.role_id = roles[role_name].id
+        u.must_change_password = False
 
     for code, name, atype in COA:
         get_or_create(db, Account, org_id=org.id, code=code,
@@ -113,9 +122,13 @@ def run():
                      ("Office Rentals LLP", "27DDDDD3333D1Z5")]:
             db.add(Vendor(org_id=org.id, name=n, gstin=g, ai_score=72))
     if not db.scalar(select(Customer).where(Customer.org_id == org.id)):
-        for n, cl in [("Acme Retail", 500000), ("BlueMart", 250000),
-                      ("Zeta Traders", 100000)]:
-            db.add(Customer(org_id=org.id, name=n, credit_limit=cl))
+        # Acme (same state as org -> CGST+SGST), BlueMart (different state ->
+        # IGST), Zeta (no GSTIN/state on file -> demonstrates the unclassified
+        # suspense-account fallback until their state is captured).
+        for n, cl, g in [("Acme Retail", 500000, "27EEEEE4444E1Z5"),
+                         ("BlueMart", 250000, "19FFFFF5555F1Z5"),
+                         ("Zeta Traders", 100000, None)]:
+            db.add(Customer(org_id=org.id, name=n, credit_limit=cl, gstin=g))
     db.flush()
 
     vendors = db.scalars(select(Vendor).where(Vendor.org_id == org.id)).all()

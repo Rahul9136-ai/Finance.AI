@@ -4,7 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.core.audit import AuditMiddleware
 from app.core.config import settings
 from app.api.routers import (
-    accounts, ai, auth, bills, dashboard, gl, invoices, journal, parties,
+    accounts, ai, auth, bills, dashboard, gl, invoices, journal, parties, users,
 )
 
 
@@ -23,7 +23,7 @@ def create_app() -> FastAPI:
     )
     app.add_middleware(AuditMiddleware)
 
-    for module in (auth, accounts, journal, gl, parties, invoices, bills, dashboard, ai):
+    for module in (auth, accounts, journal, gl, parties, invoices, bills, dashboard, ai, users):
         app.include_router(module.router)
 
     @app.get("/health", tags=["ops"])

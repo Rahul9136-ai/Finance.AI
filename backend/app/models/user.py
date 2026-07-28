@@ -25,5 +25,6 @@ class User(Base):
     full_name: Mapped[str] = mapped_column(String(120), default="")
     hashed_password: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    must_change_password: Mapped[bool] = mapped_column(Boolean, default=True)
 
     role: Mapped["Role"] = relationship(lazy="joined")
