@@ -14,6 +14,7 @@ Debits (base+gst) == Credits (tds + net), so it is always balanced.
 from __future__ import annotations
 
 import io
+import json
 import re
 from dataclasses import dataclass, field
 from datetime import date
@@ -23,16 +24,25 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai import skills
-from app.models.invoice import Invoice
+from app.models.invoice import Invoice, InvoiceLine
+from app.models.org import Organization
 from app.models.party import Vendor
 from app.services import accounts as acct
+from app.services import gst as gst_mod
 from app.services import tax_rules
 from app.services.ledger import LineInput, money, post_entry, PostingError
 
 ZERO = Decimal("0")
-_GSTIN_RE = re.compile(r"\b(\d{2}[A-Z]{5}\d{4}[A-Z]\d[Z][A-Z\d])\b")
+_GSTIN_RE = gst_mod.GSTIN_RE  # shared shape regex — see gst.pick_vendor_gstin
 _VENDOR_LABEL = re.compile(
-    r"(?:vendor|supplier|seller|billed by|sold by|bill from|company name|m/s)\s*[:\-]?\s*(.+)",
+    r"(?:vendor|supplier|seller|billed by|sold by|bill from|company name|m/s)\s*[:\-]?\s*(.*)",
+    re.I,
+)
+# A line that starts the buyer/recipient block — its name must never be
+# mistaken for the vendor's (see extract_vendor's fallback name scan).
+_BUYER_LABEL_LINE = re.compile(
+    r"^\s*(?:bill\s*to|ship\s*to|buyer|recipient|consignee|customer|billed\s*to|"
+    r"delivered\s*to|purchaser)\b",
     re.I,
 )
 
@@ -142,25 +152,48 @@ def extract_amounts(text: str) -> dict:
     }
 
 
-def extract_vendor(text: str) -> tuple[str | None, str | None]:
-    """Best-effort vendor name + GSTIN from bill text."""
-    text = text or ""
-    gm = _GSTIN_RE.search(text)
-    gstin = gm.group(1) if gm else None
+def extract_vendor(text: str, *, own_gstin: str | None = None) -> tuple[str | None, str | None, list[str]]:
+    """Best-effort vendor name + GSTIN from bill text.
 
+    A tax invoice legally shows both parties' GSTINs (seller + registered
+    buyer) — see gst.pick_vendor_gstin for how the seller's is disambiguated
+    rather than just taking whichever GSTIN appears first.
+    """
+    text = text or ""
+    gstin, gstin_warnings = gst_mod.pick_vendor_gstin(text, own_gstin=own_gstin)
+
+    lines = text.splitlines()
     name = None
-    for line in text.splitlines():
+
+    # 1) A seller/vendor label — value inline, or on the next non-blank line
+    #    (common "Sold By:\nAcme Pvt Ltd" layout, incl. after OCR line-splitting).
+    for i, line in enumerate(lines):
         m = _VENDOR_LABEL.search(line)
-        if m:
-            cand = m.group(1).strip(" :-\t")
-            if cand and "gstin" not in cand.lower() and len(cand) >= 3:
-                name = cand[:120]
-                break
+        if not m:
+            continue
+        cand = m.group(1).strip(" :-\t")
+        if not cand:
+            for nxt in lines[i + 1:i + 3]:
+                nxt = nxt.strip()
+                if nxt:
+                    cand = nxt
+                    break
+        if cand and "gstin" not in cand.lower() and len(cand) >= 3:
+            name = cand[:120]
+            break
+
     if not name:
-        # Fallback: first non-title, mostly-alphabetic line near the top.
-        for line in text.splitlines()[:8]:
+        # 2) Fallback: first plausible line near the top — but skip a buyer/
+        #    recipient block entirely, or we'd grab their name instead.
+        skip_until = -1
+        for i, line in enumerate(lines[:12]):
             s = line.strip()
             low = s.lower()
+            if _BUYER_LABEL_LINE.search(s):
+                skip_until = i + 2  # this label line + up to 2 following lines
+                continue
+            if i <= skip_until:
+                continue
             if len(s) < 3 or _GSTIN_RE.search(s):
                 continue
             if re.search(r"tax invoice|^invoice|^bill|^gstin|^date|^ref|^po\b|^order", low):
@@ -169,7 +202,7 @@ def extract_vendor(text: str) -> tuple[str | None, str | None]:
                 continue
             name = s[:120]
             break
-    return name, gstin
+    return name, gstin, gstin_warnings
 
 
 def resolve_vendor(
@@ -207,6 +240,7 @@ class Distribution:
     base: Decimal = ZERO
     gst: Decimal = ZERO
     gst_rate: Decimal = ZERO
+    gst_split: gst_mod.GstSplit = field(default_factory=gst_mod.GstSplit)
     tds: Decimal = ZERO
     tds_rate: Decimal = ZERO
     expense_account_code: str = "6000"
@@ -232,6 +266,7 @@ class Distribution:
             "base": float(money(self.base)),
             "gst": float(money(self.gst)),
             "gst_rate": float(money(self.gst_rate)),
+            "gst_split": self.gst_split.to_dict(),
             "tds": float(money(self.tds)),
             "tds_rate": float(money(self.tds_rate)),
             "gross": float(self.gross),
@@ -252,6 +287,8 @@ def distribute(
     tds_rate: float | None = None,
     tds_amount: float | None = None,
     description: str = "",
+    org_state: str | None = None,
+    vendor_state: str | None = None,
 ) -> Distribution:
     """Compute the section split, inferring whatever wasn't provided."""
     d = Distribution()
@@ -275,6 +312,7 @@ def distribute(
         raise PostingError("Provide either a base amount or a gross total.")
 
     d.gst_rate = money(d.gst / d.base * 100) if d.base else ZERO
+    d.gst_split = gst_mod.split_gst(d.gst, org_state, vendor_state)
 
     d.tds_rate = money(tds_rate) if tds_rate is not None else ZERO
     d.tds = money(tds_amount) if tds_amount is not None else money(d.base * d.tds_rate / 100)
@@ -287,8 +325,7 @@ def distribute(
     d.sections = [
         {"section": d.expense_category, "account_code": d.expense_account_code,
          "side": "debit", "amount": float(money(d.base))},
-        {"section": "GST Input Credit", "account_code": "1300",
-         "side": "debit", "amount": float(money(d.gst))},
+        *gst_mod.gst_line_sections(d.gst_split, direction="input"),
         {"section": "TDS Payable", "account_code": "2110",
          "side": "credit", "amount": float(money(d.tds))},
         {"section": "Accounts Payable", "account_code": "2000",
@@ -300,7 +337,7 @@ def distribute(
 # ---------------------------------------------------------------------------
 # File parsing — any file type routed through the universal extractor
 # ---------------------------------------------------------------------------
-def parse_bill(filename: str, content: bytes) -> dict:
+def parse_bill(filename: str, content: bytes, *, own_gstin: str | None = None) -> dict:
     """Extract text (via any-format extractor incl. OCR) + amounts from a bill."""
     from app.services.extract import extract
 
@@ -326,10 +363,10 @@ def parse_bill(filename: str, content: bytes) -> dict:
             "text_preview": "",
         }
 
-    extracted = skills.read_invoice(text)
+    extracted = skills.read_invoice(text, own_gstin=own_gstin)
     amt = extract_amounts(text)
-    vendor_name, vendor_gstin = extract_vendor(text)
-    warnings = list(amt["warnings"])
+    vendor_name, vendor_gstin, gstin_warnings = extract_vendor(text, own_gstin=own_gstin)
+    warnings = list(amt["warnings"]) + gstin_warnings
     if ocr_used:
         warnings.insert(0, "Read via OCR (scanned/image) — please double-check the amounts.")
 
@@ -353,7 +390,7 @@ def parse_bill(filename: str, content: bytes) -> dict:
 
     # If an LLM is configured, prefer its structured extraction (far more accurate
     # on arbitrary layouts); keep rule figures for anything it leaves null.
-    llm = skills.llm_extract_bill(text)
+    llm = skills.llm_extract_bill(text, own_gstin=own_gstin)
     if llm:
         def num(v):
             try:
@@ -378,7 +415,13 @@ def parse_bill(filename: str, content: bytes) -> dict:
                 result[k] = v
         if llm.get("vendor_name"):
             result["vendor_name"] = llm["vendor_name"]
-        if llm.get("vendor_gstin"):
+        llm_gstin = (llm.get("vendor_gstin") or "").strip().upper() or None
+        if llm_gstin and own_gstin and llm_gstin == own_gstin.strip().upper():
+            result["warnings"].append(
+                "AI extraction returned our own GSTIN as the vendor's — ignored; "
+                "kept the rule-based match instead."
+            )
+        elif llm_gstin:
             result["vendor_gstin"] = llm["vendor_gstin"]
         if llm.get("invoice_number"):
             result["invoice_number"] = llm["invoice_number"]
@@ -407,7 +450,8 @@ def parse_bill(filename: str, content: bytes) -> dict:
 # Itemised classification & distribution (tax rules by item)
 # ---------------------------------------------------------------------------
 def classify_bill_items(items: list[dict], *, tds_rate: float = 0,
-                        tds_amount: float | None = None) -> dict:
+                        tds_amount: float | None = None,
+                        org_state: str | None = None, vendor_state: str | None = None) -> dict:
     """Classify each line item (pen, book, laptop…) into a category with its
     applicable GST rate + GL account, compute per-item GST, and group by account
     for posting. `items` = [{description, amount}] (amount = taxable value)."""
@@ -441,6 +485,7 @@ def classify_bill_items(items: list[dict], *, tds_rate: float = 0,
 
     subtotal = money(subtotal)
     gst_total = money(gst_total)
+    gst_split = gst_mod.split_gst(gst_total, org_state, vendor_state)
     tds = money(tds_amount) if tds_amount is not None else money(subtotal * money(tds_rate) / 100)
     net_payable = money(subtotal + gst_total - tds)
 
@@ -449,9 +494,7 @@ def classify_bill_items(items: list[dict], *, tds_rate: float = 0,
     for code, g in groups.items():
         sections.append({"section": g["category"], "account_code": code,
                          "side": "debit", "amount": float(money(g["base"]))})
-    if gst_total > 0:
-        sections.append({"section": "GST Input Credit", "account_code": "1300",
-                         "side": "debit", "amount": float(gst_total)})
+    sections.extend(gst_mod.gst_line_sections(gst_split, direction="input"))
     if tds > 0:
         sections.append({"section": "TDS Payable", "account_code": "2110",
                          "side": "credit", "amount": float(tds)})
@@ -463,7 +506,7 @@ def classify_bill_items(items: list[dict], *, tds_rate: float = 0,
         "groups": {k: {"category": v["category"], "account_name": v["account_name"],
                        "base": float(money(v["base"])), "gst": float(money(v["gst"]))}
                    for k, v in groups.items()},
-        "subtotal": float(subtotal), "gst_total": float(gst_total),
+        "subtotal": float(subtotal), "gst_total": float(gst_total), "gst_split": gst_split.to_dict(),
         "tds": float(tds), "net_payable": float(net_payable),
         "sections": sections,
         "balanced": True,
@@ -486,6 +529,15 @@ def post_bill_items(
         db, org_id, vendor_id=vendor_id, name=vendor_name, gstin=vendor_gstin
     )
 
+    # Recompute the authoritative CGST/SGST/IGST split now that the vendor is
+    # resolved — never trust whatever state info the pre-posting preview had.
+    org_row = db.get(Organization, org_id)
+    own_state = gst_mod.resolve_state(org_row.state_code if org_row else None,
+                                       org_row.gstin if org_row else None)
+    cp_state = gst_mod.resolve_state(vendor.state_code if vendor else None,
+                                      vendor.gstin if vendor else None)
+    gst_split = gst_mod.split_gst(money(result["gst_total"]), own_state, cp_state)
+
     lines: list[LineInput] = []
     for code, g in result["groups"].items():
         acc = acct.by_code(db, org_id, code)
@@ -493,9 +545,9 @@ def post_bill_items(
             acc = acct.std(db, org_id, "opex")  # fall back to general expenses
         lines.append(LineInput(acc.id, debit=money(g["base"]),
                                description=f"{g['category']} — {number}"))
-    if money(result["gst_total"]) > 0:
-        lines.append(LineInput(acct.std(db, org_id, "gst_input").id,
-                               debit=money(result["gst_total"]), description="GST input credit"))
+    for row in gst_mod.gst_line_sections(gst_split, direction="input"):
+        lines.append(LineInput(acct.by_code(db, org_id, row["account_code"]).id,
+                               debit=money(row["amount"]), description=row["section"]))
     if money(result["tds"]) > 0:
         lines.append(LineInput(acct.std(db, org_id, "tds_payable").id,
                                credit=money(result["tds"]), description="TDS withheld"))
@@ -515,7 +567,15 @@ def post_bill_items(
         subtotal=float(money(result["subtotal"])), tax_total=float(money(result["gst_total"])),
         tds_total=float(money(result["tds"])), total=float(money(result["net_payable"])),
         status="open", entry_mode=entry_mode, journal_entry_id=entry.id,
+        ai_meta=json.dumps({"gst": gst_split.to_dict()}),
     )
+    for item_line in result["lines"]:
+        acc = acct.by_code(db, org_id, item_line["account_code"])
+        inv.lines.append(InvoiceLine(
+            description=item_line["description"], quantity=1,
+            unit_price=item_line["amount"], tax_rate=item_line["gst_rate"],
+            hsn_sac=item_line["hsn"], account_id=acc.id if acc else None,
+        ))
     db.add(inv)
     db.flush()
     return inv, vendor, created, result
@@ -542,13 +602,22 @@ def post_bill(
     )
     vendor_id = vendor.id if vendor else None
 
+    # Recompute the authoritative CGST/SGST/IGST split now that the vendor is
+    # resolved — never trust whatever state info the pre-posting preview had.
+    org_row = db.get(Organization, org_id)
+    own_state = gst_mod.resolve_state(org_row.state_code if org_row else None,
+                                       org_row.gstin if org_row else None)
+    cp_state = gst_mod.resolve_state(vendor.state_code if vendor else None,
+                                      vendor.gstin if vendor else None)
+    dist.gst_split = gst_mod.split_gst(dist.gst, own_state, cp_state)
+
     lines = [
         LineInput(acct.by_code(db, org_id, dist.expense_account_code).id,
                   debit=dist.base, description=description or f"Expense {number}"),
     ]
-    if dist.gst > 0:
-        lines.append(LineInput(acct.std(db, org_id, "gst_input").id,
-                               debit=dist.gst, description="GST input credit"))
+    for row in gst_mod.gst_line_sections(dist.gst_split, direction="input"):
+        lines.append(LineInput(acct.by_code(db, org_id, row["account_code"]).id,
+                               debit=money(row["amount"]), description=row["section"]))
     if dist.tds > 0:
         lines.append(LineInput(acct.std(db, org_id, "tds_payable").id,
                                credit=dist.tds, description="TDS withheld"))
@@ -567,6 +636,7 @@ def post_bill(
         subtotal=float(money(dist.base)), tax_total=float(money(dist.gst)),
         tds_total=float(money(dist.tds)), total=float(dist.net_payable),
         status="open", entry_mode=entry_mode, journal_entry_id=entry.id,
+        ai_meta=json.dumps({"gst": dist.gst_split.to_dict()}),
     )
     db.add(inv)
     db.flush()

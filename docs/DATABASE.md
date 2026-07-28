@@ -84,9 +84,30 @@ statement placement:
 
 Example seeded accounts: `1000 Cash`, `1010 Bank`, `1100 Accounts Receivable`,
 `1200 Inventory`, `1500 Fixed Assets`, `2000 Accounts Payable`,
-`2100 GST Payable`, `2110 TDS Payable`, `3000 Share Capital`,
+`2110 TDS Payable`, `3000 Share Capital`,
 `4000 Sales Revenue`, `5000 COGS`, `6000 Operating Expenses`,
 `6100 Rent`, `6200 Salaries`.
+
+### GST accounts (CGST/SGST/IGST split)
+
+GST input credit and output payable each have **4 accounts**, not one — every
+GST-bearing posting is split by place of supply (`services/gst.py`):
+
+| Code | Account | Used when |
+|---|---|---|
+| `1301`/`2101` | CGST Input/Output | intra-state (org & counterparty same state) |
+| `1302`/`2102` | SGST Input/Output | intra-state |
+| `1303`/`2103` | IGST Input/Output | inter-state (different states) |
+| `1300`/`2100` | GST Input/Output **(Unclassified)** | counterparty's state is unknown |
+
+The unclassified suspense accounts exist so the system never *guesses*
+CGST/SGST vs IGST when a vendor/customer's state can't be determined (no
+GSTIN and no explicit `state_code`) — any non-zero balance there means a
+party's state needs to be filled in before the return can be filed correctly.
+Place of supply is approximated as the counterparty's registered state,
+which covers the default/general rule only — not the statutory exceptions in
+IGST Act ss.10–13 (immovable property, event admission, GTA, SEZ, exports,
+etc.). Those need case-by-case review.
 
 ## Posting rules (double-entry engine)
 
@@ -102,9 +123,9 @@ The engine (`services/ledger.py`) guarantees:
 
 | Business event | Debit | Credit |
 |---|---|---|
-| AR invoice posted | Accounts Receivable | Sales Revenue + GST Payable |
+| AR invoice posted | Accounts Receivable | Sales Revenue + GST Output (CGST+SGST or IGST) |
 | AR payment received | Bank | Accounts Receivable |
-| AP bill posted | Expense/Asset + GST Input | Accounts Payable |
+| AP bill posted | Expense/Asset + GST Input (CGST+SGST or IGST) | Accounts Payable |
 | AP payment made | Accounts Payable | Bank |
 
 ## Indexes (Phase 1)

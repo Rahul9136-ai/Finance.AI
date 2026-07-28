@@ -69,7 +69,7 @@ call a service, and shape the response. Services own transactions and invariants
 | Skill | Input | Output | Fallback (no key) |
 |---|---|---|---|
 | Invoice Reader | PDF/text | structured invoice (vendor, lines, tax, total) | regex/heuristic field extraction |
-| Finance Chatbot | NL question | answer grounded in live DB metrics | intent-matched metric lookups |
+| Finance Chatbot | NL question | answer grounded in live DB metrics | LLM tool-calling over the other 4 skills (falls back to intent-matched metric lookups with no LLM key) |
 | Expense Categorizer | description + amount | GL account + confidence | keyword rules learned from history |
 | Fraud Detector | transaction | risk score + reasons | deterministic rules (dupes, round-amount, weekend, off-hours) |
 | Cashflow Forecast | horizon days | projected balance curve | AR/AP-aging + moving-average model |

@@ -3,22 +3,38 @@ from sqlalchemy.orm import Session
 
 from app.core.rbac import require
 from app.db.session import get_db
+from app.models.org import Organization
+from app.models.party import Vendor
 from app.models.user import User
 from app.schemas import (
     BillDistributeIn, BillItemsPostIn, BillPostIn, ClassifyItemsIn, InvoiceOut,
 )
-from app.services import bills, tax_rules
+from app.services import bills, gst as gst_mod, tax_rules
 from app.services.ledger import PostingError
 
 router = APIRouter(prefix="/api/bills", tags=["bills"])
 
 
+def _resolve_states(db: Session, org_id: int, vendor_id: int | None) -> tuple[str | None, str | None]:
+    """Org state + vendor state, for a live GST-split preview before posting."""
+    org_row = db.get(Organization, org_id)
+    own_state = gst_mod.resolve_state(org_row.state_code if org_row else None,
+                                       org_row.gstin if org_row else None)
+    vendor = db.get(Vendor, vendor_id) if vendor_id else None
+    cp_state = gst_mod.resolve_state(vendor.state_code if vendor else None,
+                                      vendor.gstin if vendor else None)
+    return own_state, cp_state
+
+
 @router.post("/classify")
-def classify(body: ClassifyItemsIn, user: User = Depends(require("invoice:read"))):
+def classify(body: ClassifyItemsIn, user: User = Depends(require("invoice:read")),
+            db: Session = Depends(get_db)):
     """Classify line items by tax rules -> category, HSN, GST%, GL account, and a
     per-category distribution preview. No posting."""
     items = [i.model_dump() for i in body.items]
-    return bills.classify_bill_items(items, tds_rate=body.tds_rate, tds_amount=body.tds_amount)
+    own_state, cp_state = _resolve_states(db, user.org_id, body.vendor_id)
+    return bills.classify_bill_items(items, tds_rate=body.tds_rate, tds_amount=body.tds_amount,
+                                     org_state=own_state, vendor_state=cp_state)
 
 
 @router.get("/tax-rules")
@@ -35,14 +51,16 @@ def list_tax_rules(user: User = Depends(require("invoice:read"))):
 async def ingest(
     file: UploadFile = File(...),
     user: User = Depends(require("invoice:read")),
+    db: Session = Depends(get_db),
 ):
     """Parse an uploaded bill (PDF/Excel/CSV) → extracted fields + a first-pass
     distribution the user can review and edit before posting."""
     content = await file.read()
     if len(content) > 10 * 1024 * 1024:
         raise HTTPException(413, "File too large (max 10 MB).")
+    org = db.get(Organization, user.org_id)
     try:
-        parsed = bills.parse_bill(file.filename or "", content)
+        parsed = bills.parse_bill(file.filename or "", content, own_gstin=org.gstin if org else None)
     except Exception as e:
         raise HTTPException(422, f"Could not parse file: {e}")
 
@@ -64,10 +82,13 @@ async def ingest(
 def distribute(
     body: BillDistributeIn,
     user: User = Depends(require("invoice:read")),
+    db: Session = Depends(get_db),
 ):
     """Live preview: recompute the section split as the user edits amounts."""
     try:
-        dist = bills.distribute(**body.model_dump())
+        own_state, cp_state = _resolve_states(db, user.org_id, body.vendor_id)
+        params = body.model_dump(exclude={"vendor_id"})
+        dist = bills.distribute(**params, org_state=own_state, vendor_state=cp_state)
         return dist.to_dict()
     except PostingError as e:
         raise HTTPException(422, str(e))

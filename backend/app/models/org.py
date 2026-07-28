@@ -13,3 +13,6 @@ class Organization(Base):
     country: Mapped[str] = mapped_column(String(2), default="IN")
     base_currency: Mapped[str] = mapped_column(String(3), default="INR")
     gstin: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # 2-digit GST state code (e.g. "27" = Maharashtra). Auto-derived from gstin
+    # when unset; only needs setting explicitly if gstin is absent.
+    state_code: Mapped[str | None] = mapped_column(String(2), nullable=True)

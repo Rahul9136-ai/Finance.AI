@@ -24,11 +24,25 @@ def _outstanding(db: Session, org_id: int, kind: str) -> Decimal:
     return money(sum((money(t) - money(p) for t, p in rows), Decimal("0")))
 
 
+def _sum_codes(db: Session, org_id: int, codes: list[str]) -> Decimal:
+    total = Decimal("0")
+    for code in codes:
+        a = acct.by_code(db, org_id, code)
+        if a:
+            total += account_balance(db, org_id=org_id, account_id=a.id)
+    return total
+
+
+# GST Output Payable (liability) and GST Input Credit (asset) each have a
+# proper CGST/SGST/IGST account plus an "unclassified" suspense account used
+# only when a party's state couldn't be determined — see services/gst.py.
+_GST_OUTPUT_CODES = ["2100", "2101", "2102", "2103"]
+_GST_INPUT_CODES = ["1300", "1301", "1302", "1303"]
+
+
 def kpis(db: Session, org_id: int) -> dict:
     bank = acct.by_code(db, org_id, "1010")
     cash = acct.by_code(db, org_id, "1000")
-    gst_out = acct.by_code(db, org_id, "2100")
-    gst_in = acct.by_code(db, org_id, "1300")
 
     cash_balance = Decimal("0")
     for a in (bank, cash):
@@ -39,11 +53,8 @@ def kpis(db: Session, org_id: int) -> dict:
     revenue = by_type.get("income", Decimal("0"))
     expense = by_type.get("expense", Decimal("0"))
 
-    gst_payable = Decimal("0")
-    if gst_out:
-        gst_payable += account_balance(db, org_id=org_id, account_id=gst_out.id)
-    if gst_in:
-        gst_payable -= account_balance(db, org_id=org_id, account_id=gst_in.id)
+    gst_payable = (_sum_codes(db, org_id, _GST_OUTPUT_CODES)
+                   - _sum_codes(db, org_id, _GST_INPUT_CODES))
 
     return {
         "cash_balance": float(cash_balance),

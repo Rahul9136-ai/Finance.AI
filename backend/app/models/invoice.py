@@ -50,6 +50,7 @@ class InvoiceLine(Base):
     quantity: Mapped[float] = mapped_column(Numeric(18, 3), default=1)
     unit_price: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
     tax_rate: Mapped[float] = mapped_column(Numeric(5, 2), default=0)  # % GST
+    hsn_sac: Mapped[str | None] = mapped_column(String(10), nullable=True)
     account_id: Mapped[int | None] = mapped_column(
         ForeignKey("account.id"), nullable=True
     )
